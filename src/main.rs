@@ -1,23 +1,36 @@
 use std::time::Duration;
 
 use bevy::{math::{vec2, vec3}, prelude::*};
-use rand::Rng;
+use rand::prelude::*;
 use bevy_editor_pls::prelude::*;
 
 const SCREEN_NORMAL_SIZE: Vec2 = vec2(1280.0, 720.0);
 const PLAYER_SIZE: Vec2 = vec2(10.0, 20.0);
 const PLAYER_X: f32 = 3.0 / 4.0;
 const JUMP_STRENGTH: f32 = 200.0;
+const JUMP_STOP_STRENGTH: f32 = 2.0 / 3.0;
 const DROP_STRENGTH: f32 = 100.0;
 const GRAVITY_LEVEL: f32 = 100.0;
+const DOWNWARD_GRAVITY_MULTIPLYER: f32 = 2.0;
 const PLATFORM_HIGHT: f32 = 10.0;
 const PLATFORM_MIN_WIDTH: u16 = 200;
 const PLATFORM_MAX_WIDTH: u16 = 400;
-const PLATFROM_TOP_Y: f32 = 100.0;
-const PLATFROM_BOTTOM_Y: f32 = -100.0;
 const PLATFROM_SPAWN_RATE_SECS: f32 = 1.0;
 const STARTING_GAME_SPEED: f32 = 200.0;
 const JUMP_BUFFER: f32 = 0.1;
+
+const PLATFORM_SPAWNING_AREAS: [SpawnArea; 2] = [
+    SpawnArea{
+        high: 200.0,
+        low: 0.0,
+        points: 6
+    },
+    SpawnArea{
+        high: 0.0,
+        low: -200.0,
+        points: 6
+    }
+];
 
 fn main() {
     App::new()
@@ -64,12 +77,14 @@ fn setup_system(
         PlayerStatusManager {
             jump_buffer: 10.0,
             space_shipping: true,
+            jump_upping: false,
             hanging: false
         },
         Name::new("Player")
     ));
 }
 
+// Things happen here...
 fn velocity_system(
     mut object_query: Query<(&mut Transform, &mut Velocity, Option<&mut PlayerStatusManager>, &Sprite)>,
     platform_query: Query<(&Transform, &Sprite), (With<Platform>, Without<Velocity>)>,
@@ -88,12 +103,16 @@ fn velocity_system(
             }
         }
 
+        let mut gravity_multiplayer = 1.0;
+        if object_velocity.y < 0.0 {
+            gravity_multiplayer = DOWNWARD_GRAVITY_MULTIPLYER;
+        }
 
         let p_y = object_transform.translation.y;
 
-        object_velocity.y -= GRAVITY_LEVEL * time.delta_seconds();
+        object_velocity.y -= GRAVITY_LEVEL * time.delta_seconds() * gravity_multiplayer;
         object_transform.translation.y += (object_velocity.y * time.delta_seconds() / SCREEN_NORMAL_SIZE.y) * window.y;
-        object_velocity.y -= GRAVITY_LEVEL * time.delta_seconds();
+        object_velocity.y -= GRAVITY_LEVEL * time.delta_seconds() * gravity_multiplayer;
 
         let object_size = object_sprite.custom_size.unwrap_or_default();
 
@@ -139,15 +158,17 @@ fn velocity_system(
                 // If the object has the PlayerStatusManager than allow the jumping to happen
                 if let Some(player_status_manager) = player_status_manager.as_deref_mut() {
                     player_status_manager.jump_buffer = 0.0;
+                    player_status_manager.jump_upping = false;
                 }
             }
 
             if bumping_bottom_of_platform {
                 object_transform.translation.y = bottom_of_platform - object_size.y / 2.0;
-                object_velocity.y = 100.0;
+                object_velocity.y = 125.0;
 
                 if let Some(player_status_manager) = player_status_manager.as_deref_mut() {
                     player_status_manager.hanging = true;
+                    player_status_manager.jump_upping = false;
                 }
             }
         }
@@ -163,11 +184,18 @@ fn input_system(
         let jump_button_pressed = input.just_pressed(KeyCode::Space);
         if jump_button_pressed && (player_status_manager.jump_buffer < JUMP_BUFFER || player_status_manager.space_shipping) {
             velocity.y = JUMP_STRENGTH;
+            player_status_manager.jump_upping = true;
             player_status_manager.jump_buffer = 100.0;
             player_status_manager.space_shipping = false;
         } else if player_status_manager.hanging && jump_button_pressed {
             velocity.y = -DROP_STRENGTH;
+            player_status_manager.jump_upping = false;
             player_status_manager.jump_buffer = 100.0;
+        }
+
+        let jump_button_released = input.just_released(KeyCode::Space);
+        if jump_button_released && velocity.y > 0.0 && player_status_manager.jump_upping {
+            velocity.y *= JUMP_STOP_STRENGTH;
         }
 
         player_status_manager.jump_buffer += time.delta_seconds();
@@ -199,23 +227,25 @@ fn spawner_system(
 
     if platfrom_spawn_timer.0.just_finished() {
         // Spawn new platform
-        let width = rng.gen_range(PLATFORM_MIN_WIDTH..=PLATFORM_MAX_WIDTH);
-        let starting_x = window.x / 2.0 + (width as f32 / SCREEN_NORMAL_SIZE.y) * window.y;
-        let starting_y = rng.gen_range(PLATFROM_BOTTOM_Y..=PLATFROM_TOP_Y);
-        commands.spawn((
-            SpriteBundle {
-                transform: Transform {
-                    translation: vec3(starting_x, starting_y, 0.0),
+        for platform in PLATFORM_SPAWNING_AREAS {
+            let width = rng.gen_range(PLATFORM_MIN_WIDTH..=PLATFORM_MAX_WIDTH);
+            let starting_x = window.x / 2.0 + (width as f32 / SCREEN_NORMAL_SIZE.y) * window.y;
+            let starting_y = platform.get_spawn_point();
+            commands.spawn((
+                SpriteBundle {
+                    transform: Transform {
+                        translation: vec3(starting_x, starting_y, 0.0),
+                        ..default()
+                    },
+                    sprite: Sprite {
+                        custom_size: Some((vec2(width as f32, PLATFORM_HIGHT) / SCREEN_NORMAL_SIZE.y) * window.y),
+                        ..default()
+                    },
                     ..default()
                 },
-                sprite: Sprite {
-                    custom_size: Some((vec2(width as f32, PLATFORM_HIGHT) / SCREEN_NORMAL_SIZE.y) * window.y),
-                    ..default()
-                },
-                ..default()
-            },
-            Platform
-        ));
+                Platform
+            ));
+        }
     }
 }
 
@@ -259,14 +289,15 @@ struct Velocity {
 #[derive(Component)]
 struct Platform;
 
-#[derive(Component)]
-struct DebugTarget;
+// #[derive(Component)]
+// struct DebugTarget;
 
 #[derive(Component, Reflect)]
 #[reflect(Component)]
 struct PlayerStatusManager {
     jump_buffer: f32,
     space_shipping: bool,
+    jump_upping: bool,
     hanging: bool
 }
 
@@ -275,3 +306,30 @@ struct PlatformSpawnTimer(Timer);
 
 #[derive(Resource)]
 struct GameSpeed(f32);
+
+struct SpawnArea {
+    high: f32,
+    low: f32,
+    points: i32
+}
+impl SpawnArea {
+    fn get_all_points(&self) -> Vec<f32> {
+        let interval = (self.high - self.low) / (self.points - 1) as f32;
+
+        let mut result: Vec<f32> = Vec::new();
+        
+        for i in 0..self.points - 1 {
+            let point = self.high - (i as f32 * interval);
+            result.push(point)
+        }
+        result
+    }
+
+    fn get_spawn_point(&self) -> f32 {
+        let mut rng = rand::thread_rng();
+        let all_points: Vec<f32> = self.get_all_points();
+
+        let thingy = *all_points.choose(&mut rng).unwrap();
+        thingy
+    }
+}
