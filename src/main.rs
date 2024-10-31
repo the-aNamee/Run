@@ -164,7 +164,7 @@ fn velocity_system(
 
             if bumping_bottom_of_platform {
                 object_transform.translation.y = bottom_of_platform - object_size.y / 2.0;
-                object_velocity.y = 125.0;
+                object_velocity.y = 130.0;
 
                 if let Some(player_status_manager) = player_status_manager.as_deref_mut() {
                     player_status_manager.hanging = true;
